@@ -288,7 +288,6 @@ func (s *Stream) waitRead() error {
 	case <-s.die:
 		return io.ErrClosedPipe
 	}
-
 }
 
 // Write implements net.Conn
@@ -326,7 +325,7 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 		frame.data = bts[:sz]
 		bts = bts[sz:]
 		n, err := s.sess.writeFrameInternal(frame, deadline, CLSDATA)
-		s.numWritten++
+		atomic.AddUint32(&s.numWritten, uint32(sz))
 		sent += n
 		if err != nil {
 			return sent, err

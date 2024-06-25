@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,7 @@ import (
 )
 
 func init() {
+	runtime.GOMAXPROCS(1)
 	go func() {
 		log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
 	}()
@@ -288,7 +290,7 @@ func TestWriteToV2(t *testing.T) {
 }
 
 func TestGetDieCh(t *testing.T) {
-	cs, ss, err := getSmuxStreamPair()
+	cs, ss, err := getSmuxStreamPair(false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,7 +579,7 @@ func TestKeepAliveBlockWriteTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cli.Close()
-	//when writeFrame block, keepalive in old version never timeout
+	// when writeFrame block, keepalive in old version never timeout
 	blockWriteCli := &blockWriteConn{cli}
 
 	config := DefaultConfig()
@@ -834,7 +836,7 @@ func TestRandomFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	session, _ = Client(cli, nil)
-	//close first
+	// close first
 	session.Close()
 	for i := 0; i < 100; i++ {
 		f := newFrame(1, byte(rand.Uint32()), rand.Uint32())
@@ -863,7 +865,7 @@ func TestWriteFrameInternal(t *testing.T) {
 		t.Fatal(err)
 	}
 	session, _ = Client(cli, nil)
-	//close first
+	// close first
 	session.Close()
 	for i := 0; i < 100; i++ {
 		f := newFrame(1, byte(rand.Uint32()), rand.Uint32())
@@ -881,7 +883,7 @@ func TestWriteFrameInternal(t *testing.T) {
 		f := newFrame(1, allcmds[rand.Int()%len(allcmds)], rand.Uint32())
 		session.writeFrameInternal(f, time.After(session.config.KeepAliveTimeout), CLSDATA)
 	}
-	//deadline occur
+	// deadline occur
 	{
 		c := make(chan time.Time)
 		close(c)
@@ -905,7 +907,7 @@ func TestWriteFrameInternal(t *testing.T) {
 		f := newFrame(1, byte(rand.Uint32()), rand.Uint32())
 		c := make(chan time.Time)
 		go func() {
-			//die first, deadline second, better for coverage
+			// die first, deadline second, better for coverage
 			time.Sleep(time.Second)
 			session.Close()
 			time.Sleep(time.Second)
@@ -982,8 +984,19 @@ func BenchmarkAcceptClose(b *testing.B) {
 		}
 	}
 }
+
 func BenchmarkConnSmux(b *testing.B) {
-	cs, ss, err := getSmuxStreamPair()
+	cs, ss, err := getSmuxStreamPair(false)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer cs.Close()
+	defer ss.Close()
+	bench(b, cs, ss)
+}
+
+func BenchmarkPipeSmux(b *testing.B) {
+	cs, ss, err := getSmuxStreamPair(true)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -1002,10 +1015,85 @@ func BenchmarkConnTCP(b *testing.B) {
 	bench(b, cs, ss)
 }
 
-func getSmuxStreamPair() (*Stream, *Stream, error) {
-	c1, c2, err := getTCPConnectionPair()
-	if err != nil {
-		return nil, nil, err
+type readWriter struct {
+	remain []byte
+	ch     chan []byte
+}
+
+func (rw *readWriter) Read(p []byte) (n int, err error) {
+	if len(rw.remain) == 0 {
+		b, ok := <-rw.ch
+		if !ok {
+			return 0, io.EOF
+		}
+		rw.remain = b
+	}
+	n = copy(p, rw.remain)
+	rw.remain = rw.remain[n:]
+	return
+}
+
+func (rw *readWriter) Write(p []byte) (n int, err error) {
+	rw.ch <- p
+	return len(p), nil
+}
+
+func (rw *readWriter) Close() error {
+	close(rw.ch)
+	return nil
+}
+
+type rwPipe struct {
+	r io.ReadCloser
+	w io.WriteCloser
+}
+
+func (rw *rwPipe) Read(p []byte) (n int, err error) {
+	return rw.r.Read(p)
+}
+
+func (rw *rwPipe) WriteTo(w io.Writer) (n int64, err error) {
+	return io.Copy(w, rw)
+}
+
+func (rw *rwPipe) Write(p []byte) (n int, err error) {
+	return rw.w.Write(p)
+}
+
+func (rw *rwPipe) WriteBuffers(v [][]byte) (n int, err error) {
+	var nn int
+	for idx := range v {
+		nn, err = rw.w.Write(v[idx])
+		n += nn
+		if err != nil {
+			return
+		}
+	}
+	return
+}
+
+func (rw *rwPipe) Close() error {
+	rw.r.Close()
+	rw.w.Close()
+	return nil
+}
+
+func newPipe() (io.ReadWriteCloser, io.ReadWriteCloser) {
+	p1 := &readWriter{ch: make(chan []byte, 1)}
+	p2 := &readWriter{ch: make(chan []byte, 1)}
+	return &rwPipe{r: p1, w: p2}, &rwPipe{r: p2, w: p1}
+}
+
+func getSmuxStreamPair(piped bool) (*Stream, *Stream, error) {
+	var c1, c2 io.ReadWriteCloser
+	var err error
+	if piped {
+		c1, c2 = newPipe()
+	} else {
+		c1, c2, err = getTCPConnectionPair()
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	s, err := Server(c2, nil)
@@ -1064,11 +1152,16 @@ func getTCPConnectionPair() (net.Conn, net.Conn, error) {
 }
 
 func bench(b *testing.B, rd io.Reader, wr io.Writer) {
-	buf := make([]byte, 128*1024)
-	buf2 := make([]byte, 128*1024)
-	b.SetBytes(128 * 1024)
+	runtime.GC()
+
+	const size = 128 * 1024
+
+	buf := make([]byte, size)
+	buf2 := make([]byte, size)
+	b.SetBytes(size)
 	b.ResetTimer()
 	b.ReportAllocs()
+	b.SetParallelism(1)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -1078,7 +1171,7 @@ func bench(b *testing.B, rd io.Reader, wr io.Writer) {
 		for {
 			n, _ := rd.Read(buf2)
 			count += n
-			if count == 128*1024*b.N {
+			if count == size*b.N {
 				return
 			}
 		}

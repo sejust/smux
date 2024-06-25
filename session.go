@@ -57,7 +57,7 @@ type Session struct {
 	bucketNotify chan struct{} // used for waiting for tokens
 
 	streams    map[uint32]*Stream // all streams in this session
-	streamLock sync.Mutex         // locks streams
+	streamLock sync.RWMutex       // locks streams
 
 	die     chan struct{} // flag session has died
 	dieOnce sync.Once
@@ -146,8 +146,6 @@ func (s *Session) OpenStream() (*Stream, error) {
 		return nil, err
 	}
 
-	s.streamLock.Lock()
-	defer s.streamLock.Unlock()
 	select {
 	case <-s.chSocketReadError:
 		return nil, s.socketReadError.Load().(error)
@@ -156,7 +154,9 @@ func (s *Session) OpenStream() (*Stream, error) {
 	case <-s.die:
 		return nil, io.ErrClosedPipe
 	default:
+		s.streamLock.Lock()
 		s.streams[sid] = stream
+		s.streamLock.Unlock()
 		return stream, nil
 	}
 }
@@ -352,23 +352,23 @@ func (s *Session) recvLoop() {
 				}
 				s.streamLock.Unlock()
 			case cmdFIN:
-				s.streamLock.Lock()
+				s.streamLock.RLock()
 				if stream, ok := s.streams[sid]; ok {
 					stream.fin()
 					stream.notifyReadEvent()
 				}
-				s.streamLock.Unlock()
+				s.streamLock.RUnlock()
 			case cmdPSH:
 				if hdr.Length() > 0 {
 					newbuf := defaultAllocator.Get(int(hdr.Length()))
 					if written, err := io.ReadFull(s.conn, newbuf); err == nil {
-						s.streamLock.Lock()
+						s.streamLock.RLock()
 						if stream, ok := s.streams[sid]; ok {
 							stream.pushBytes(newbuf)
 							atomic.AddInt32(&s.bucket, -int32(written))
 							stream.notifyReadEvent()
 						}
-						s.streamLock.Unlock()
+						s.streamLock.RUnlock()
 					} else {
 						s.notifyReadError(err)
 						return
