@@ -14,9 +14,7 @@ type Stream struct {
 	id   uint32
 	sess *Session
 
-	buffers [][]byte
-	heads   [][]byte // slice heads kept for recycle
-
+	buffer     *ringbuffer
 	bufferLock sync.Mutex
 	frameSize  int
 
@@ -50,6 +48,7 @@ type Stream struct {
 func newStream(id uint32, frameSize int, sess *Session) *Stream {
 	s := new(Stream)
 	s.id = id
+	s.buffer = newRingbuffer()
 	s.chReadEvent = make(chan struct{}, 1)
 	s.chUpdate = make(chan struct{}, 1)
 	s.frameSize = frameSize
@@ -89,20 +88,7 @@ func (s *Stream) tryRead(b []byte) (n int, err error) {
 		return 0, nil
 	}
 
-	s.bufferLock.Lock()
-	if len(s.buffers) > 0 {
-		n = copy(b, s.buffers[0])
-		s.buffers[0] = s.buffers[0][n:]
-		if len(s.buffers[0]) == 0 {
-			s.buffers[0] = nil
-			s.buffers = s.buffers[1:]
-			// full recycle
-			defaultAllocator.Put(s.heads[0])
-			s.heads = s.heads[1:]
-		}
-	}
-	s.bufferLock.Unlock()
-
+	n = s.buffer.Read(b)
 	if n > 0 {
 		s.sess.returnTokens(n)
 		return n, nil
@@ -122,18 +108,7 @@ func (s *Stream) tryReadv2(b []byte) (n int, err error) {
 	}
 
 	var notifyConsumed uint32
-	s.bufferLock.Lock()
-	if len(s.buffers) > 0 {
-		n = copy(b, s.buffers[0])
-		s.buffers[0] = s.buffers[0][n:]
-		if len(s.buffers[0]) == 0 {
-			s.buffers[0] = nil
-			s.buffers = s.buffers[1:]
-			// full recycle
-			defaultAllocator.Put(s.heads[0])
-			s.heads = s.heads[1:]
-		}
-	}
+	n = s.buffer.Read(b)
 
 	// in an ideal environment:
 	// if more than half of buffer has consumed, send read ack to peer
@@ -141,6 +116,7 @@ func (s *Stream) tryReadv2(b []byte) (n int, err error) {
 	// won't slow down because of waiting for ACK, as long as the
 	// consumer keeps on reading data
 	// s.numRead == n also notify window at the first read
+	s.bufferLock.Lock()
 	s.numRead += uint32(n)
 	s.incr += uint32(n)
 	if s.incr >= uint32(s.sess.config.MaxStreamBuffer/2) || s.numRead == uint32(n) {
@@ -174,19 +150,11 @@ func (s *Stream) WriteTo(w io.Writer) (n int64, err error) {
 	}
 
 	for {
-		var buf []byte
-		s.bufferLock.Lock()
-		if len(s.buffers) > 0 {
-			buf = s.buffers[0]
-			s.buffers = s.buffers[1:]
-			s.heads = s.heads[1:]
-		}
-		s.bufferLock.Unlock()
-
+		buf, reuse := s.buffer.Dequeue()
 		if buf != nil {
 			nw, ew := w.Write(buf)
 			s.sess.returnTokens(len(buf))
-			defaultAllocator.Put(buf)
+			reuse()
 			if nw > 0 {
 				n += int64(nw)
 			}
@@ -203,13 +171,8 @@ func (s *Stream) WriteTo(w io.Writer) (n int64, err error) {
 func (s *Stream) writeTov2(w io.Writer) (n int64, err error) {
 	for {
 		var notifyConsumed uint32
-		var buf []byte
+		buf, reuse := s.buffer.Dequeue()
 		s.bufferLock.Lock()
-		if len(s.buffers) > 0 {
-			buf = s.buffers[0]
-			s.buffers = s.buffers[1:]
-			s.heads = s.heads[1:]
-		}
 		s.numRead += uint32(len(buf))
 		s.incr += uint32(len(buf))
 		if s.incr >= uint32(s.sess.config.MaxStreamBuffer/2) || s.numRead == uint32(len(buf)) {
@@ -221,7 +184,7 @@ func (s *Stream) writeTov2(w io.Writer) (n int64, err error) {
 		if buf != nil {
 			nw, ew := w.Write(buf)
 			s.sess.returnTokens(len(buf))
-			defaultAllocator.Put(buf)
+			reuse()
 			if nw > 0 {
 				n += int64(nw)
 			}
@@ -273,9 +236,7 @@ func (s *Stream) waitRead() error {
 		return nil
 	case <-s.chFinEvent:
 		// BUG(xtaci): Fix for https://github.com/xtaci/smux/issues/82
-		s.bufferLock.Lock()
-		defer s.bufferLock.Unlock()
-		if len(s.buffers) > 0 {
+		if s.buffer.HasData() {
 			return nil
 		}
 		return io.EOF
@@ -502,24 +463,13 @@ func (s *Stream) RemoteAddr() net.Addr {
 
 // pushBytes append buf to buffers
 func (s *Stream) pushBytes(buf []byte) (written int, err error) {
-	s.bufferLock.Lock()
-	s.buffers = append(s.buffers, buf)
-	s.heads = append(s.heads, buf)
-	s.bufferLock.Unlock()
+	s.buffer.Enqueue(buf)
 	return
 }
 
 // recycleTokens transform remaining bytes to tokens(will truncate buffer)
 func (s *Stream) recycleTokens() (n int) {
-	s.bufferLock.Lock()
-	for k := range s.buffers {
-		n += len(s.buffers[k])
-		defaultAllocator.Put(s.heads[k])
-	}
-	s.buffers = nil
-	s.heads = nil
-	s.bufferLock.Unlock()
-	return
+	return s.buffer.Recycle()
 }
 
 // notify read event
