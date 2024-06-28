@@ -295,12 +295,12 @@ func TestGetDieCh(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ss.Close()
-	dieCh := ss.GetDieCh()
+	dieCh := ss.CloseChan()
 	go func() {
 		select {
 		case <-dieCh:
 		case <-time.Tick(time.Second):
-			t.Fatal("wait die chan timeout")
+			panic("wait die chan timeout")
 		}
 	}()
 	cs.Close()
@@ -842,6 +842,8 @@ func TestRandomFrame(t *testing.T) {
 		f := newFrame(1, byte(rand.Uint32()), rand.Uint32())
 		session.writeFrame(f)
 	}
+	var rh rawHeader
+	t.Log(rh)
 }
 
 func TestWriteFrameInternal(t *testing.T) {

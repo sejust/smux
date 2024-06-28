@@ -18,8 +18,16 @@ func TestConfig(t *testing.T) {
 	VerifyConfig(DefaultConfig())
 
 	config := DefaultConfig()
-	config.KeepAliveInterval = 0
+	config.Version = 0xff
 	err := VerifyConfig(config)
+	t.Log(err)
+	if err == nil {
+		t.Fatal(err)
+	}
+
+	config = DefaultConfig()
+	config.KeepAliveInterval = 0
+	err = VerifyConfig(config)
 	t.Log(err)
 	if err == nil {
 		t.Fatal(err)
@@ -69,6 +77,15 @@ func TestConfig(t *testing.T) {
 	config = DefaultConfig()
 	config.MaxStreamBuffer = 100
 	config.MaxReceiveBuffer = 99
+	err = VerifyConfig(config)
+	t.Log(err)
+	if err == nil {
+		t.Fatal(err)
+	}
+
+	config = DefaultConfig()
+	config.MaxStreamBuffer = 1 << 33
+	config.MaxReceiveBuffer = 1 << 34
 	err = VerifyConfig(config)
 	t.Log(err)
 	if err == nil {

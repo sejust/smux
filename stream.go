@@ -14,9 +14,8 @@ type Stream struct {
 	id   uint32
 	sess *Session
 
-	buffer     *ringbuffer
-	bufferLock sync.Mutex
-	frameSize  int
+	buffer    *ringbuffer
+	frameSize int
 
 	// notify a read event
 	chReadEvent chan struct{}
@@ -111,14 +110,12 @@ func (s *Stream) tryReadv2(b []byte) (n int, err error) {
 	// won't slow down because of waiting for ACK, as long as the
 	// consumer keeps on reading data
 	// s.numRead == n also notify window at the first read
-	s.bufferLock.Lock()
 	s.numRead += uint32(n)
 	s.incr += uint32(n)
 	if s.incr >= uint32(s.sess.config.MaxStreamBuffer/2) || s.numRead == uint32(n) {
 		notifyConsumed = s.numRead
 		s.incr = 0
 	}
-	s.bufferLock.Unlock()
 
 	if n > 0 {
 		s.sess.returnTokens(n)
@@ -167,14 +164,12 @@ func (s *Stream) writeTov2(w io.Writer) (n int64, err error) {
 	for {
 		var notifyConsumed uint32
 		buf, reuse := s.buffer.Dequeue()
-		s.bufferLock.Lock()
 		s.numRead += uint32(len(buf))
 		s.incr += uint32(len(buf))
 		if s.incr >= uint32(s.sess.config.MaxStreamBuffer/2) || s.numRead == uint32(len(buf)) {
 			notifyConsumed = s.numRead
 			s.incr = 0
 		}
-		s.bufferLock.Unlock()
 
 		if buf != nil {
 			nw, ew := w.Write(buf)
@@ -283,7 +278,7 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 		frame.data = bts[:sz]
 		bts = bts[sz:]
 		n, err := s.sess.writeFrameInternal(frame, deadline, CLSDATA)
-		atomic.AddUint32(&s.numWritten, uint32(sz))
+		s.numWritten += uint32(sz)
 		sent += n
 		if err != nil {
 			return sent, err
@@ -308,7 +303,7 @@ func (s *Stream) writeV2(b []byte, deadline <-chan time.Time) (n int, err error)
 		// eg1: uint32(0) - uint32(math.MaxUint32) = 1
 		// eg2: int32(uint32(0) - uint32(1)) = -1
 		// security check for misbehavior
-		inflight := int32(atomic.LoadUint32(&s.numWritten) - atomic.LoadUint32(&s.peerConsumed))
+		inflight := int32(s.numWritten - atomic.LoadUint32(&s.peerConsumed))
 		if inflight < 0 {
 			return 0, ErrConsumed
 		}
@@ -331,7 +326,7 @@ func (s *Stream) writeV2(b []byte, deadline <-chan time.Time) (n int, err error)
 				frame.data = bts[:sz]
 				bts = bts[sz:]
 				n, err := s.sess.writeFrameInternal(frame, deadline, CLSDATA)
-				atomic.AddUint32(&s.numWritten, uint32(sz))
+				s.numWritten += uint32(sz)
 				sent += n
 				if err != nil {
 					return sent, err
@@ -379,10 +374,20 @@ func (s *Stream) Close() error {
 	}
 }
 
-// GetDieCh returns a readonly chan which can be readable
+// CloseChan returns a readonly chan which can be readable
 // when the stream is to be closed.
-func (s *Stream) GetDieCh() <-chan struct{} {
+func (s *Stream) CloseChan() <-chan struct{} {
 	return s.die
+}
+
+// IsClosed does a safe check to see if we have shutdown.
+func (s *Stream) IsClosed() bool {
+	select {
+	case <-s.die:
+		return true
+	default:
+		return false
+	}
 }
 
 // SetReadDeadline sets the read deadline as defined by
@@ -420,22 +425,12 @@ func (s *Stream) sessionClose() { s.dieOnce.Do(func() { close(s.die) }) }
 
 // LocalAddr satisfies net.Conn interface
 func (s *Stream) LocalAddr() net.Addr {
-	if ts, ok := s.sess.conn.(interface {
-		LocalAddr() net.Addr
-	}); ok {
-		return ts.LocalAddr()
-	}
-	return nil
+	return s.sess.LocalAddr()
 }
 
 // RemoteAddr satisfies net.Conn interface
 func (s *Stream) RemoteAddr() net.Addr {
-	if ts, ok := s.sess.conn.(interface {
-		RemoteAddr() net.Addr
-	}); ok {
-		return ts.RemoteAddr()
-	}
-	return nil
+	return s.sess.RemoteAddr()
 }
 
 // pushBytes append buf to buffers
