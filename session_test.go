@@ -300,7 +300,7 @@ func TestGetDieCh(t *testing.T) {
 		select {
 		case <-dieCh:
 		case <-time.Tick(time.Second):
-			t.Fatal("wait die chan timeout")
+			panic("wait die chan timeout")
 		}
 	}()
 	cs.Close()

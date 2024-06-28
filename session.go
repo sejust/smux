@@ -1,7 +1,6 @@
 package smux
 
 import (
-	"container/heap"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -13,7 +12,6 @@ import (
 
 const (
 	defaultAcceptBacklog = 1024
-	maxShaperSize        = 1024
 	openCloseTimeout     = 30 * time.Second // stream open/close timeout
 )
 
@@ -34,8 +32,6 @@ var (
 )
 
 type writeRequest struct {
-	class  CLASSID
-	seq    uint32
 	frame  Frame
 	result chan writeResult
 }
@@ -78,9 +74,8 @@ type Session struct {
 
 	deadline atomic.Value
 
-	requestID uint32            // write request monotonic increasing
-	shaper    chan writeRequest // a shaper for writing
-	writes    chan writeRequest
+	ctrl   chan writeRequest // a ctrl frame for writing
+	writes chan writeRequest
 }
 
 func newSession(config *Config, conn io.ReadWriteCloser, client bool) *Session {
@@ -92,8 +87,8 @@ func newSession(config *Config, conn io.ReadWriteCloser, client bool) *Session {
 	s.chAccepts = make(chan *Stream, defaultAcceptBacklog)
 	s.bucket = int32(config.MaxReceiveBuffer)
 	s.bucketNotify = make(chan struct{}, 1)
-	s.shaper = make(chan writeRequest)
-	s.writes = make(chan writeRequest)
+	s.ctrl = make(chan writeRequest, 1)
+	s.writes = make(chan writeRequest, 1024)
 	s.chSocketReadError = make(chan struct{})
 	s.chSocketWriteError = make(chan struct{})
 
@@ -103,7 +98,6 @@ func newSession(config *Config, conn io.ReadWriteCloser, client bool) *Session {
 		s.nextStreamID = 0
 	}
 
-	go s.shaperLoop()
 	go s.recvLoop()
 	go s.sendLoop()
 	if !config.KeepAliveDisabled {
@@ -406,53 +400,13 @@ func (s *Session) keepalive() {
 	}
 }
 
-// shaper shapes the sending sequence among streams
-func (s *Session) shaperLoop() {
-	var reqs shaperHeap
-	var next writeRequest
-	var chWrite chan writeRequest
-	var chShaper chan writeRequest
-
-	for {
-		// chWrite is not available until it has packet to send
-		if len(reqs) > 0 {
-			chWrite = s.writes
-			next = heap.Pop(&reqs).(writeRequest)
-		} else {
-			chWrite = nil
-		}
-
-		// control heap size, chShaper is not available until packets are less than maximum allowed
-		if len(reqs) >= maxShaperSize {
-			chShaper = nil
-		} else {
-			chShaper = s.shaper
-		}
-
-		// assertion on non nil
-		if chShaper == nil && chWrite == nil {
-			panic("both channel are nil")
-		}
-
-		select {
-		case <-s.die:
-			return
-		case r := <-chShaper:
-			if chWrite != nil { // next is valid, reshape
-				heap.Push(&reqs, next)
-			}
-			heap.Push(&reqs, r)
-		case chWrite <- next:
-		}
-	}
-}
-
 func (s *Session) sendLoop() {
 	var buf []byte
 	var n int
 	var nn int
 	var err error
 	var vec [][]byte // vector for writeBuffers
+	var request writeRequest
 
 	bw, ok := s.conn.(interface {
 		WriteBuffers(v [][]byte) (n int, err error)
@@ -467,9 +421,17 @@ func (s *Session) sendLoop() {
 
 	for {
 		select {
-		case <-s.die:
-			return
-		case request := <-s.writes:
+		case request = <-s.ctrl:
+		default:
+			select {
+			case <-s.die:
+				return
+			case request = <-s.ctrl:
+			case request = <-s.writes:
+			}
+		}
+
+		{
 			buf[0] = request.frame.ver
 			buf[1] = request.frame.cmd
 			binary.LittleEndian.PutUint16(buf[2:], uint16(len(request.frame.data)))
@@ -518,13 +480,15 @@ func (s *Session) writeFrame(f Frame) (n int, err error) {
 // internal writeFrame version to support deadline used in keepalive
 func (s *Session) writeFrameInternal(f Frame, deadline <-chan time.Time, class CLASSID) (int, error) {
 	req := writeRequest{
-		class:  class,
 		frame:  f,
-		seq:    atomic.AddUint32(&s.requestID, 1),
 		result: make(chan writeResult, 1),
 	}
+	writeCh := s.writes
+	if class == CLSCTRL {
+		writeCh = s.ctrl
+	}
 	select {
-	case s.shaper <- req:
+	case writeCh <- req:
 	case <-s.die:
 		return 0, io.ErrClosedPipe
 	case <-s.chSocketWriteError:
