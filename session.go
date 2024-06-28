@@ -18,7 +18,7 @@ const (
 )
 
 // define frame class
-type CLASSID int
+type CLASSID uint8
 
 const (
 	CLSCTRL CLASSID = iota
@@ -35,8 +35,8 @@ var (
 
 type writeRequest struct {
 	class  CLASSID
-	frame  Frame
 	seq    uint32
+	frame  Frame
 	result chan writeResult
 }
 
@@ -70,11 +70,6 @@ type Session struct {
 	socketReadErrorOnce  sync.Once
 	socketWriteErrorOnce sync.Once
 
-	// smux protocol errors
-	protoError     atomic.Value
-	chProtoError   chan struct{}
-	protoErrorOnce sync.Once
-
 	chAccepts chan *Stream
 
 	dataReady int32 // flag data has arrived
@@ -101,7 +96,6 @@ func newSession(config *Config, conn io.ReadWriteCloser, client bool) *Session {
 	s.writes = make(chan writeRequest)
 	s.chSocketReadError = make(chan struct{})
 	s.chSocketWriteError = make(chan struct{})
-	s.chProtoError = make(chan struct{})
 
 	if client {
 		s.nextStreamID = 1
@@ -183,8 +177,6 @@ func (s *Session) AcceptStream() (*Stream, error) {
 		return nil, ErrTimeout
 	case <-s.chSocketReadError:
 		return nil, s.socketReadError.Load().(error)
-	case <-s.chProtoError:
-		return nil, s.protoError.Load().(error)
 	case <-s.die:
 		return nil, io.ErrClosedPipe
 	}
@@ -240,13 +232,6 @@ func (s *Session) notifyWriteError(err error) {
 	s.socketWriteErrorOnce.Do(func() {
 		s.socketWriteError.Store(err)
 		close(s.chSocketWriteError)
-	})
-}
-
-func (s *Session) notifyProtoError(err error) {
-	s.protoErrorOnce.Do(func() {
-		s.protoError.Store(err)
-		close(s.chProtoError)
 	})
 }
 
@@ -334,7 +319,7 @@ func (s *Session) recvLoop() {
 		if _, err := io.ReadFull(s.conn, hdr[:]); err == nil {
 			atomic.StoreInt32(&s.dataReady, 1)
 			if hdr.Version() != byte(s.config.Version) {
-				s.notifyProtoError(ErrInvalidProtocol)
+				s.notifyReadError(ErrInvalidProtocol)
 				return
 			}
 			sid := hdr.StreamID()
@@ -386,7 +371,7 @@ func (s *Session) recvLoop() {
 					return
 				}
 			default:
-				s.notifyProtoError(ErrInvalidProtocol)
+				s.notifyReadError(ErrInvalidProtocol)
 				return
 			}
 		} else {

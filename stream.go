@@ -80,12 +80,11 @@ func (s *Stream) Read(b []byte) (n int, err error) {
 
 // tryRead is the nonblocking version of Read
 func (s *Stream) tryRead(b []byte) (n int, err error) {
-	if s.sess.config.Version == 2 {
-		return s.tryReadv2(b)
-	}
-
 	if len(b) == 0 {
 		return 0, nil
+	}
+	if s.sess.config.Version == 2 {
+		return s.tryReadv2(b)
 	}
 
 	n = s.buffer.Read(b)
@@ -103,10 +102,6 @@ func (s *Stream) tryRead(b []byte) (n int, err error) {
 }
 
 func (s *Stream) tryReadv2(b []byte) (n int, err error) {
-	if len(b) == 0 {
-		return 0, nil
-	}
-
 	var notifyConsumed uint32
 	n = s.buffer.Read(b)
 
@@ -242,8 +237,6 @@ func (s *Stream) waitRead() error {
 		return io.EOF
 	case <-s.sess.chSocketReadError:
 		return s.sess.socketReadError.Load().(error)
-	case <-s.sess.chProtoError:
-		return s.sess.protoError.Load().(error)
 	case <-deadline:
 		return ErrTimeout
 	case <-s.die:
@@ -256,8 +249,15 @@ func (s *Stream) waitRead() error {
 // Note that the behavior when multiple goroutines write concurrently is not deterministic,
 // frames may interleave in random way.
 func (s *Stream) Write(b []byte) (n int, err error) {
-	if s.sess.config.Version == 2 {
-		return s.writeV2(b)
+	// check empty input
+	if len(b) == 0 {
+		return 0, nil
+	}
+	// check if stream has closed
+	select {
+	case <-s.die:
+		return 0, io.ErrClosedPipe
+	default:
 	}
 
 	var deadline <-chan time.Time
@@ -267,11 +267,8 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 		deadline = timer.C
 	}
 
-	// check if stream has closed
-	select {
-	case <-s.die:
-		return 0, io.ErrClosedPipe
-	default:
+	if s.sess.config.Version == 2 {
+		return s.writeV2(b, deadline)
 	}
 
 	// frame split and transmit
@@ -296,27 +293,7 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 	return sent, nil
 }
 
-func (s *Stream) writeV2(b []byte) (n int, err error) {
-	// check empty input
-	if len(b) == 0 {
-		return 0, nil
-	}
-
-	// check if stream has closed
-	select {
-	case <-s.die:
-		return 0, io.ErrClosedPipe
-	default:
-	}
-
-	// create write deadline timer
-	var deadline <-chan time.Time
-	if d, ok := s.writeDeadline.Load().(time.Time); ok && !d.IsZero() {
-		timer := time.NewTimer(time.Until(d))
-		defer timer.Stop()
-		deadline = timer.C
-	}
-
+func (s *Stream) writeV2(b []byte, deadline <-chan time.Time) (n int, err error) {
 	// frame split and transmit process
 	sent := 0
 	frame := newFrame(byte(s.sess.config.Version), cmdPSH, s.id)
