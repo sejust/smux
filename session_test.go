@@ -528,7 +528,7 @@ func TestIsClose(t *testing.T) {
 	}
 }
 
-func TestKeepAliveTimeout(t *testing.T) {
+func TestKeepAliveTimeoutServer(t *testing.T) {
 	ln, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		t.Fatal(err)
@@ -547,7 +547,7 @@ func TestKeepAliveTimeout(t *testing.T) {
 	config := DefaultConfig()
 	config.KeepAliveInterval = time.Second
 	config.KeepAliveTimeout = 2 * time.Second
-	session, _ := Client(cli, config)
+	session, _ := Server(cli, config)
 	time.Sleep(3 * time.Second)
 	if !session.IsClosed() {
 		t.Fatal("keepalive-timeout failed")
@@ -564,7 +564,7 @@ func (c *blockWriteConn) Write(b []byte) (n int, err error) {
 	return c.Conn.Write(b)
 }
 
-func TestKeepAliveBlockWriteTimeout(t *testing.T) {
+func TestKeepAliveTimeoutClient(t *testing.T) {
 	ln, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		t.Fatal(err)

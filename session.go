@@ -107,7 +107,7 @@ func newSession(config *Config, conn io.ReadWriteCloser, client bool) *Session {
 	go s.recvLoop()
 	go s.sendLoop()
 	if !config.KeepAliveDisabled {
-		go s.keepalive()
+		go s.keepalive(client)
 	}
 	return s
 }
@@ -381,25 +381,48 @@ func (s *Session) recvLoop() {
 	}
 }
 
-func (s *Session) keepalive() {
-	tickerPing := time.NewTicker(s.config.KeepAliveInterval)
+func (s *Session) keepalive(client bool) {
 	tickerTimeout := time.NewTicker(s.config.KeepAliveTimeout)
-	defer tickerPing.Stop()
 	defer tickerTimeout.Stop()
+	if !client { // server side
+		for {
+			select {
+			case <-tickerTimeout.C:
+				if !atomic.CompareAndSwapInt32(&s.dataReady, 1, 0) {
+					// recvLoop may block while bucket is 0, in this case,
+					// session should not be closed.
+					if atomic.LoadInt32(&s.bucket) > 0 {
+						s.Close()
+						return
+					}
+				}
+			case <-s.die:
+				return
+			}
+		}
+	}
+
+	tickerPing := time.NewTicker(s.config.KeepAliveInterval)
+	defer tickerPing.Stop()
+	alive := false
 	for {
 		select {
 		case <-tickerPing.C:
-			s.writeFrameInternal(newFrame(byte(s.config.Version), cmdNOP, 0), tickerPing.C, CLSCTRL)
+			_, err := s.writeFrameInternal(newFrame(byte(s.config.Version), cmdNOP, 0), tickerPing.C, CLSCTRL)
+			if err == nil {
+				alive = true
+			}
 			s.notifyBucket() // force a signal to the recvLoop
 		case <-tickerTimeout.C:
 			if !atomic.CompareAndSwapInt32(&s.dataReady, 1, 0) {
 				// recvLoop may block while bucket is 0, in this case,
 				// session should not be closed.
-				if atomic.LoadInt32(&s.bucket) > 0 {
+				if atomic.LoadInt32(&s.bucket) > 0 && !alive {
 					s.Close()
 					return
 				}
 			}
+			alive = false
 		case <-s.die:
 			return
 		}
