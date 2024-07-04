@@ -556,12 +556,25 @@ func TestKeepAliveTimeoutServer(t *testing.T) {
 
 type blockWriteConn struct {
 	net.Conn
+
+	deadline time.Time
 }
 
 func (c *blockWriteConn) Write(b []byte) (n int, err error) {
+	if !c.deadline.IsZero() {
+		timer := time.NewTimer(time.Until(c.deadline))
+		defer timer.Stop()
+		<-timer.C
+		return 0, ErrTimeout
+	}
 	forever := time.Hour * 24
 	time.Sleep(forever)
 	return c.Conn.Write(b)
+}
+
+func (c *blockWriteConn) SetWriteDeadline(t time.Time) error {
+	c.deadline = t
+	return nil
 }
 
 func TestKeepAliveTimeoutClient(t *testing.T) {
@@ -580,7 +593,7 @@ func TestKeepAliveTimeoutClient(t *testing.T) {
 	}
 	defer cli.Close()
 	// when writeFrame block, keepalive in old version never timeout
-	blockWriteCli := &blockWriteConn{cli}
+	blockWriteCli := &blockWriteConn{Conn: cli}
 
 	config := DefaultConfig()
 	config.KeepAliveInterval = time.Second
@@ -871,7 +884,11 @@ func TestWriteFrameInternal(t *testing.T) {
 	session.Close()
 	for i := 0; i < 100; i++ {
 		f := newFrame(1, byte(rand.Uint32()), rand.Uint32())
-		session.writeFrameInternal(f, time.After(session.config.KeepAliveTimeout), CLSDATA)
+		deadline := writeDealine{
+			time: time.Now().Add(session.config.KeepAliveTimeout),
+			wait: time.After(session.config.KeepAliveTimeout),
+		}
+		session.writeFrameInternal(f, deadline, CLSDATA)
 	}
 
 	// random cmds
@@ -883,14 +900,18 @@ func TestWriteFrameInternal(t *testing.T) {
 	session, _ = Client(cli, nil)
 	for i := 0; i < 100; i++ {
 		f := newFrame(1, allcmds[rand.Int()%len(allcmds)], rand.Uint32())
-		session.writeFrameInternal(f, time.After(session.config.KeepAliveTimeout), CLSDATA)
+		deadline := writeDealine{
+			time: time.Now().Add(session.config.KeepAliveTimeout),
+			wait: time.After(session.config.KeepAliveTimeout),
+		}
+		session.writeFrameInternal(f, deadline, CLSDATA)
 	}
 	// deadline occur
 	{
 		c := make(chan time.Time)
 		close(c)
 		f := newFrame(1, allcmds[rand.Int()%len(allcmds)], rand.Uint32())
-		_, err := session.writeFrameInternal(f, c, CLSDATA)
+		_, err := session.writeFrameInternal(f, writeDealine{wait: c}, CLSDATA)
 		if !strings.Contains(err.Error(), "timeout") {
 			t.Fatal("write frame with deadline failed", err)
 		}
@@ -905,7 +926,7 @@ func TestWriteFrameInternal(t *testing.T) {
 		config := DefaultConfig()
 		config.KeepAliveInterval = time.Second
 		config.KeepAliveTimeout = 2 * time.Second
-		session, _ = Client(&blockWriteConn{cli}, config)
+		session, _ = Client(&blockWriteConn{Conn: cli}, config)
 		f := newFrame(1, byte(rand.Uint32()), rand.Uint32())
 		c := make(chan time.Time)
 		go func() {
@@ -915,7 +936,7 @@ func TestWriteFrameInternal(t *testing.T) {
 			time.Sleep(time.Second)
 			close(c)
 		}()
-		_, err = session.writeFrameInternal(f, c, CLSDATA)
+		_, err = session.writeFrameInternal(f, writeDealine{wait: c}, CLSDATA)
 		if !strings.Contains(err.Error(), "closed pipe") {
 			t.Fatal("write frame with to closed conn failed", err)
 		}

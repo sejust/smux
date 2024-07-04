@@ -32,13 +32,19 @@ var (
 )
 
 type writeRequest struct {
-	frame  Frame
-	result chan writeResult
+	frame    Frame
+	deadline time.Time
+	result   chan writeResult
 }
 
 type writeResult struct {
 	n   int
 	err error
+}
+
+type writeDealine struct {
+	time time.Time
+	wait <-chan time.Time
 }
 
 // Session defines a multiplexed connection for streams
@@ -406,7 +412,11 @@ func (s *Session) keepalive(client bool) {
 	for {
 		select {
 		case <-tickerPing.C:
-			_, err := s.writeFrameInternal(newFrame(byte(s.config.Version), cmdNOP, 0), tickerPing.C, CLSCTRL)
+			deadline := writeDealine{
+				time: time.Now().Add(s.config.KeepAliveInterval),
+				wait: tickerPing.C,
+			}
+			_, err := s.writeFrameInternal(newFrame(byte(s.config.Version), cmdNOP, 0), deadline, CLSCTRL)
 			if err == nil {
 				alive = true
 			}
@@ -445,6 +455,13 @@ func (s *Session) sendLoop() {
 		buf = make([]byte, (1<<16)+headerSize)
 	}
 
+	setWriteDeadline := func(t time.Time) error { return nil }
+	if wd, ok := s.conn.(interface {
+		SetWriteDeadline(t time.Time) error
+	}); ok {
+		setWriteDeadline = wd.SetWriteDeadline
+	}
+
 	for {
 		select {
 		case request = <-s.ctrl:
@@ -463,6 +480,7 @@ func (s *Session) sendLoop() {
 			binary.LittleEndian.PutUint16(buf[2:], uint16(len(request.frame.data)))
 			binary.LittleEndian.PutUint32(buf[4:], request.frame.sid)
 
+			setWriteDeadline(request.deadline)
 			if len(vec) > 0 {
 				vec[0] = buf[:headerSize]
 				vec[1] = request.frame.data
@@ -496,27 +514,40 @@ func (s *Session) sendLoop() {
 // writeFrame writes the frame to the underlying connection
 // and returns the number of bytes written if successful
 func (s *Session) writeFrame(f Frame) (n int, err error) {
-	return s.writeFrameInternal(f, time.After(openCloseTimeout), CLSCTRL)
+	timer := time.NewTimer(openCloseTimeout)
+	defer timer.Stop()
+	deadline := writeDealine{
+		time: time.Now().Add(openCloseTimeout),
+		wait: timer.C,
+	}
+	return s.writeFrameInternal(f, deadline, CLSCTRL)
 }
 
 // internal writeFrame version to support deadline used in keepalive
-func (s *Session) writeFrameInternal(f Frame, deadline <-chan time.Time, class CLASSID) (int, error) {
+func (s *Session) writeFrameInternal(f Frame, deadline writeDealine, class CLASSID) (int, error) {
 	req := writeRequest{
-		frame:  f,
-		result: s.resultChPool.Get().(chan writeResult),
+		frame:    f,
+		deadline: deadline.time,
+		result:   s.resultChPool.Get().(chan writeResult),
 	}
 	writeCh := s.writes
 	if class == CLSCTRL {
 		writeCh = s.ctrl
 	}
+
 	select {
-	case writeCh <- req:
-	case <-s.die:
-		return 0, io.ErrClosedPipe
-	case <-s.chSocketWriteError:
-		return 0, s.socketWriteError.Load().(error)
-	case <-deadline:
+	case <-deadline.wait:
 		return 0, ErrTimeout
+	default:
+		select {
+		case writeCh <- req:
+		case <-s.die:
+			return 0, io.ErrClosedPipe
+		case <-s.chSocketWriteError:
+			return 0, s.socketWriteError.Load().(error)
+		case <-deadline.wait:
+			return 0, ErrTimeout
+		}
 	}
 
 	select {
@@ -527,7 +558,5 @@ func (s *Session) writeFrameInternal(f Frame, deadline <-chan time.Time, class C
 		return 0, io.ErrClosedPipe
 	case <-s.chSocketWriteError:
 		return 0, s.socketWriteError.Load().(error)
-	case <-deadline:
-		return 0, ErrTimeout
 	}
 }

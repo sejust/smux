@@ -196,11 +196,12 @@ func (s *Stream) writeTov2(w io.Writer) (n int64, err error) {
 
 func (s *Stream) sendWindowUpdate(consumed uint32) error {
 	var timer *time.Timer
-	var deadline <-chan time.Time
+	var deadline writeDealine
 	if d, ok := s.readDeadline.Load().(time.Time); ok && !d.IsZero() {
 		timer = time.NewTimer(time.Until(d))
 		defer timer.Stop()
-		deadline = timer.C
+		deadline.time = d
+		deadline.wait = timer.C
 	}
 
 	frame := newFrame(byte(s.sess.config.Version), cmdUPD, s.id)
@@ -255,11 +256,12 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 	default:
 	}
 
-	var deadline <-chan time.Time
+	var deadline writeDealine
 	if d, ok := s.writeDeadline.Load().(time.Time); ok && !d.IsZero() {
 		timer := time.NewTimer(time.Until(d))
 		defer timer.Stop()
-		deadline = timer.C
+		deadline.time = d
+		deadline.wait = timer.C
 	}
 
 	if s.sess.config.Version == 2 {
@@ -288,7 +290,7 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 	return sent, nil
 }
 
-func (s *Stream) writeV2(b []byte, deadline <-chan time.Time) (n int, err error) {
+func (s *Stream) writeV2(b []byte, deadline writeDealine) (n int, err error) {
 	// frame split and transmit process
 	sent := 0
 	frame := newFrame(byte(s.sess.config.Version), cmdPSH, s.id)
@@ -343,7 +345,7 @@ func (s *Stream) writeV2(b []byte, deadline <-chan time.Time) (n int, err error)
 				return 0, io.EOF
 			case <-s.die:
 				return sent, io.ErrClosedPipe
-			case <-deadline:
+			case <-deadline.wait:
 				return sent, ErrTimeout
 			case <-s.sess.chSocketWriteError:
 				return sent, s.sess.socketWriteError.Load().(error)
