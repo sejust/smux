@@ -475,9 +475,8 @@ func (s *Session) sendLoop() {
 		}
 
 		{
-			buf[0] = request.frame.ver
-			buf[1] = request.frame.cmd
-			binary.LittleEndian.PutUint16(buf[2:], uint16(len(request.frame.data)))
+			buf[0] = (request.frame.ver << 4) | (request.frame.cmd & 0x0f)
+			binary.LittleEndian.PutUint32(buf[1:], uint32(len(request.frame.data)))
 			binary.LittleEndian.PutUint32(buf[4:], request.frame.sid)
 
 			setWriteDeadline(request.deadline)

@@ -28,12 +28,19 @@ const (
 	initialPeerWindow = 262144
 )
 
+//  0                   1                   2                   3
+//  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+// +-------+-------+-----------------------------------------------+
+// |  Ver  |  Cmd  |                   length                      |
+// +-------+-------+-----------------------------------------------+
+// |                         StreamID                              |
+// +---------------------------------------------------------------+
+
 const (
-	sizeOfVer    = 1
-	sizeOfCmd    = 1
-	sizeOfLength = 2
+	sizeOfVerCmd = 1
+	sizeOfLength = 3
 	sizeOfSid    = 4
-	headerSize   = sizeOfVer + sizeOfCmd + sizeOfSid + sizeOfLength
+	headerSize   = sizeOfVerCmd + sizeOfLength + sizeOfSid
 )
 
 // Frame defines a packet from or to be multiplexed into a single connection
@@ -51,15 +58,15 @@ func newFrame(version byte, cmd byte, sid uint32) Frame {
 type rawHeader [headerSize]byte
 
 func (h rawHeader) Version() byte {
-	return h[0]
+	return h[0] >> 4
 }
 
 func (h rawHeader) Cmd() byte {
-	return h[1]
+	return h[0] & 0x0f
 }
 
-func (h rawHeader) Length() uint16 {
-	return binary.LittleEndian.Uint16(h[2:])
+func (h rawHeader) Length() uint32 {
+	return binary.LittleEndian.Uint32(h[1:]) & 0xffffff
 }
 
 func (h rawHeader) StreamID() uint32 {

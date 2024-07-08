@@ -834,9 +834,8 @@ func TestRandomFrame(t *testing.T) {
 	f.data = rnd
 
 	buf := make([]byte, headerSize+len(f.data))
-	buf[0] = f.ver
-	buf[1] = f.cmd
-	binary.LittleEndian.PutUint16(buf[2:], uint16(len(rnd)+1)) /// incorrect size
+	buf[0] = (f.ver << 4) | (f.cmd & 0x0f)
+	binary.LittleEndian.PutUint32(buf[1:], uint32(len(rnd)+1)) // incorrect size
 	binary.LittleEndian.PutUint32(buf[4:], f.sid)
 	copy(buf[headerSize:], f.data)
 
