@@ -51,7 +51,7 @@ func TestConfig(t *testing.T) {
 	}
 
 	config = DefaultConfig()
-	config.MaxFrameSize = 65536
+	config.MaxFrameSize = 1 << 24
 	err = VerifyConfig(config)
 	t.Log(err)
 	if err == nil {
@@ -93,11 +93,10 @@ func TestConfig(t *testing.T) {
 	}
 
 	var bts buffer
-	if _, err := Server(&bts, config); err == nil {
+	if _, err := Server(&bts, config, nil); err == nil {
 		t.Fatal("server started with wrong config")
 	}
-
-	if _, err := Client(&bts, config); err == nil {
+	if _, err := Client(&bts, config, nil); err == nil {
 		t.Fatal("client started with wrong config")
 	}
 }

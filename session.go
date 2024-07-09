@@ -29,6 +29,7 @@ var (
 	ErrGoAway          = errors.New("stream id overflows, should start a new connection")
 	ErrTimeout         = errors.New("timeout")
 	ErrWouldBlock      = errors.New("operation would block on IO")
+	ErrAllocOversize   = errors.New("allocator was oversize")
 )
 
 type writeRequest struct {
@@ -83,9 +84,11 @@ type Session struct {
 	ctrl         chan writeRequest // a ctrl frame for writing
 	writes       chan writeRequest
 	resultChPool sync.Pool
+
+	allocator Allocator
 }
 
-func newSession(config *Config, conn io.ReadWriteCloser, client bool) *Session {
+func newSession(config *Config, conn io.ReadWriteCloser, allocator Allocator, client bool) *Session {
 	s := new(Session)
 	s.die = make(chan struct{})
 	s.conn = conn
@@ -101,6 +104,7 @@ func newSession(config *Config, conn io.ReadWriteCloser, client bool) *Session {
 	}}
 	s.chSocketReadError = make(chan struct{})
 	s.chSocketWriteError = make(chan struct{})
+	s.allocator = allocator
 
 	if client {
 		s.nextStreamID = 1
@@ -307,8 +311,36 @@ func (s *Session) returnTokens(n int) {
 
 // recvLoop keeps on reading from underlying connection if tokens are available
 func (s *Session) recvLoop() {
-	var hdr rawHeader
-	var updHdr updHeader
+	var (
+		err error
+
+		hdr     rawHeader
+		hdrBuf  = hdr[:]
+		hdrCopy = func() {}
+
+		upd     updHeader
+		updBuf  = upd[:]
+		updCopy = func() {}
+	)
+
+	if s.allocator.Registered() {
+		hdrBuf, err = s.allocator.Get(len(hdr))
+		if err != nil {
+			s.notifyReadError(err)
+			return
+		}
+		defer func() { s.allocator.Put(hdrBuf) }()
+
+		updBuf, err = s.allocator.Get(len(upd))
+		if err != nil {
+			s.notifyReadError(err)
+			return
+		}
+		defer func() { s.allocator.Put(updBuf) }()
+
+		hdrCopy = func() { copy(hdr[:], hdrBuf) }
+		updCopy = func() { copy(upd[:], updBuf) }
+	}
 
 	for {
 		for atomic.LoadInt32(&s.bucket) <= 0 && !s.IsClosed() {
@@ -320,7 +352,8 @@ func (s *Session) recvLoop() {
 		}
 
 		// read header first
-		if _, err := io.ReadFull(s.conn, hdr[:]); err == nil {
+		if _, err := io.ReadFull(s.conn, hdrBuf); err == nil {
+			hdrCopy()
 			atomic.StoreInt32(&s.dataReady, 1)
 			if hdr.Version() != byte(s.config.Version) {
 				s.notifyReadError(ErrInvalidProtocol)
@@ -349,25 +382,33 @@ func (s *Session) recvLoop() {
 				s.streamLock.RUnlock()
 			case cmdPSH:
 				if hdr.Length() > 0 {
-					newbuf := defaultAllocator.Get(int(hdr.Length()))
+					newbuf, err := s.allocator.Get(int(hdr.Length()))
+					if err != nil {
+						s.notifyReadError(err)
+						return
+					}
 					if written, err := io.ReadFull(s.conn, newbuf); err == nil {
 						s.streamLock.RLock()
 						if stream, ok := s.streams[sid]; ok {
 							stream.pushBytes(newbuf)
 							atomic.AddInt32(&s.bucket, -int32(written))
 							stream.notifyReadEvent()
+						} else {
+							s.allocator.Put(newbuf)
 						}
 						s.streamLock.RUnlock()
 					} else {
+						s.allocator.Put(newbuf)
 						s.notifyReadError(err)
 						return
 					}
 				}
 			case cmdUPD:
-				if _, err := io.ReadFull(s.conn, updHdr[:]); err == nil {
+				if _, err := io.ReadFull(s.conn, updBuf); err == nil {
+					updCopy()
 					s.streamLock.Lock()
 					if stream, ok := s.streams[sid]; ok {
-						stream.update(updHdr.Consumed(), updHdr.Window())
+						stream.update(upd.Consumed(), upd.Window())
 					}
 					s.streamLock.Unlock()
 				} else {
@@ -449,10 +490,26 @@ func (s *Session) sendLoop() {
 	})
 
 	if ok {
-		buf = make([]byte, headerSize)
+		if s.allocator.Registered() {
+			buf, err = s.allocator.Get(headerSize)
+		} else {
+			buf = make([]byte, headerSize)
+		}
 		vec = make([][]byte, 2)
 	} else {
-		buf = make([]byte, (1<<16)+headerSize)
+		size := s.config.MaxFrameSize + headerSize
+		if s.allocator.Registered() {
+			buf, err = s.allocator.Get(size)
+		} else {
+			buf = make([]byte, size)
+		}
+	}
+	if err != nil {
+		s.notifyWriteError(err)
+		return
+	}
+	if s.allocator.Registered() {
+		defer func() { s.allocator.Put(buf) }()
 	}
 
 	setWriteDeadline := func(t time.Time) error { return nil }

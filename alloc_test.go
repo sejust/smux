@@ -7,32 +7,32 @@ import (
 
 func TestAllocGet(t *testing.T) {
 	alloc := NewAllocator()
-	if alloc.Get(0) != nil {
+	if alloc.Registered() {
+		t.Fatal("registered")
+	}
+	if _, err := alloc.Get(0); err != ErrAllocOversize {
 		t.Fatal(0)
 	}
-	if len(alloc.Get(1)) != 1 {
+	if b, _ := alloc.Get(1); len(b) != 1 {
 		t.Fatal(1)
 	}
-	if len(alloc.Get(2)) != 2 {
+	if b, _ := alloc.Get(2); len(b) != 2 {
 		t.Fatal(2)
 	}
-	if len(alloc.Get(3)) != 3 || cap(alloc.Get(3)) != 4 {
+	if b, _ := alloc.Get(3); len(b) != 3 || cap(b) != 4 {
 		t.Fatal(3)
 	}
-	if len(alloc.Get(4)) != 4 {
+	if b, _ := alloc.Get(4); len(b) != 4 {
 		t.Fatal(4)
 	}
-	if len(alloc.Get(1023)) != 1023 || cap(alloc.Get(1023)) != 1024 {
+	if b, _ := alloc.Get(1023); len(b) != 1023 || cap(b) != 1024 {
 		t.Fatal(1023)
 	}
-	if len(alloc.Get(1024)) != 1024 {
-		t.Fatal(1024)
+	if b, _ := alloc.Get(maxsize); len(b) != maxsize {
+		t.Fatal(maxsize)
 	}
-	if len(alloc.Get(65536)) != 65536 {
-		t.Fatal(65536)
-	}
-	if alloc.Get(65537) != nil {
-		t.Fatal(65537)
+	if _, err := alloc.Get(maxsize + 1); err != ErrAllocOversize {
+		t.Fatal(maxsize + 1)
 	}
 }
 
@@ -60,9 +60,9 @@ func TestAllocPut(t *testing.T) {
 
 func TestAllocPutThenGet(t *testing.T) {
 	alloc := NewAllocator()
-	data := alloc.Get(4)
+	data, _ := alloc.Get(4)
 	alloc.Put(data)
-	newData := alloc.Get(4)
+	newData, _ := alloc.Get(4)
 	if cap(data) != cap(newData) {
 		t.Fatal("different cap while alloc.Get()")
 	}

@@ -68,8 +68,8 @@ func VerifyConfig(config *Config) error {
 	if config.MaxFrameSize <= 0 {
 		return errors.New("max frame size must be positive")
 	}
-	if config.MaxFrameSize > 65535 {
-		return errors.New("max frame size must not be larger than 65535")
+	if config.MaxFrameSize > 16777215 {
+		return errors.New("max frame size must not be larger than 16777215")
 	}
 	if config.MaxReceiveBuffer <= 0 {
 		return errors.New("max receive buffer must be positive")
@@ -87,24 +87,29 @@ func VerifyConfig(config *Config) error {
 }
 
 // Server is used to initialize a new server-side connection.
-func Server(conn io.ReadWriteCloser, config *Config) (*Session, error) {
+func Server(conn io.ReadWriteCloser, config *Config, allocator Allocator) (*Session, error) {
 	if config == nil {
 		config = DefaultConfig()
 	}
 	if err := VerifyConfig(config); err != nil {
 		return nil, err
 	}
-	return newSession(config, conn, false), nil
+	if allocator == nil {
+		allocator = defaultAllocator
+	}
+	return newSession(config, conn, allocator, false), nil
 }
 
 // Client is used to initialize a new client-side connection.
-func Client(conn io.ReadWriteCloser, config *Config) (*Session, error) {
+func Client(conn io.ReadWriteCloser, config *Config, allocator Allocator) (*Session, error) {
 	if config == nil {
 		config = DefaultConfig()
 	}
-
 	if err := VerifyConfig(config); err != nil {
 		return nil, err
 	}
-	return newSession(config, conn, true), nil
+	if allocator == nil {
+		allocator = defaultAllocator
+	}
+	return newSession(config, conn, allocator, true), nil
 }

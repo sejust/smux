@@ -47,7 +47,7 @@ type Stream struct {
 func newStream(id uint32, frameSize int, sess *Session) *Stream {
 	s := new(Stream)
 	s.id = id
-	s.buffer = newRingbuffer()
+	s.buffer = newRingbuffer(sess.allocator)
 	s.chReadEvent = make(chan struct{}, 1)
 	s.chUpdate = make(chan struct{}, 1)
 	s.frameSize = frameSize

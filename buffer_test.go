@@ -10,7 +10,7 @@ import (
 )
 
 func TestRingbufferBase(t *testing.T) {
-	ring := newRingbuffer()
+	ring := newRingbuffer(defaultAllocator)
 
 	if n := ring.Read(make([]byte, 8)); n != 0 {
 		t.Fatal("empty read")
@@ -22,10 +22,14 @@ func TestRingbufferBase(t *testing.T) {
 		t.Fatal("empty has data")
 	}
 
-	ring.Enqueue(defaultAllocator.Get(64))
-	ring.Enqueue(defaultAllocator.Get(64))
-	ring.Enqueue(defaultAllocator.Get(64))
-	ring.Enqueue(defaultAllocator.Get(64))
+	getBuffer := func() []byte {
+		b, _ := defaultAllocator.Get(64)
+		return b
+	}
+	ring.Enqueue(getBuffer())
+	ring.Enqueue(getBuffer())
+	ring.Enqueue(getBuffer())
+	ring.Enqueue(getBuffer())
 	buf := make([]byte, 32)
 	if n := ring.Read(buf); n != 32 {
 		t.Fatal("read half")
@@ -53,7 +57,7 @@ func TestRingbufferBase(t *testing.T) {
 }
 
 func TestRingbufferData(t *testing.T) {
-	ring := newRingbuffer()
+	ring := newRingbuffer(defaultAllocator)
 	newBuffer := func() []byte {
 		return make([]byte, mrand.Intn(32<<10)+(32<<10))
 	}
@@ -114,7 +118,6 @@ func (b *testBuffers) read(p []byte) {
 		b.buffers[0] = b.buffers[0][n:]
 		if len(b.buffers[0]) == 0 {
 			b.buffers = b.buffers[1:]
-			defaultAllocator.Put(b.heads[0])
 			b.heads = b.heads[1:]
 		}
 	}
@@ -130,26 +133,34 @@ func (b *testBuffers) append(p []byte) {
 
 func BenchmarkBufferSlice(b *testing.B) {
 	r := make([]byte, 32)
+	w := make([]byte, 64)
 	buff := &testBuffers{}
 	const n = 128
 	b.SetBytes(64 * n)
 	for i := 0; i < b.N; i++ {
 		for range [n]struct{}{} {
-			buff.append(defaultAllocator.Get(64))
+			buff.append(w)
 			buff.read(r)
 			buff.read(r)
 		}
 	}
 }
 
+type mockAlloc struct{}
+
+func (mockAlloc) Get(size int) ([]byte, error) { return nil, nil }
+func (mockAlloc) Put([]byte) error             { return nil }
+func (mockAlloc) Registered() bool             { return false }
+
 func BenchmarkBufferRing(b *testing.B) {
 	r := make([]byte, 32)
-	ring := newRingbuffer()
+	w := make([]byte, 64)
+	ring := newRingbuffer(mockAlloc{})
 	const n = 128
 	b.SetBytes(64 * n)
 	for i := 0; i < b.N; i++ {
 		for range [n]struct{}{} {
-			ring.Enqueue(defaultAllocator.Get(64))
+			ring.Enqueue(w)
 			ring.Read(r)
 			ring.Read(r)
 		}

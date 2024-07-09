@@ -8,10 +8,11 @@ type ringbuffer struct {
 	offset  int // offset of the indexed data
 	next    int // next empty place, -1 means to grow
 	buffers [][]byte
+	alloc   Allocator // put buffer back to Allocator
 }
 
-func newRingbuffer() *ringbuffer {
-	return &ringbuffer{next: -1}
+func newRingbuffer(alloc Allocator) *ringbuffer {
+	return &ringbuffer{next: -1, alloc: alloc}
 }
 
 func (r *ringbuffer) Enqueue(p []byte) {
@@ -62,7 +63,7 @@ func (r *ringbuffer) Read(p []byte) (n int) {
 	}
 	r.lock.Unlock()
 	if putback {
-		defaultAllocator.Put(buff)
+		r.alloc.Put(buff)
 	}
 	return
 }
@@ -74,7 +75,7 @@ func (r *ringbuffer) Dequeue() (p []byte, reuse func()) {
 		return
 	}
 	if buff := r.buffers[r.index]; buff != nil {
-		reuse = func() { defaultAllocator.Put(buff) }
+		reuse = func() { r.alloc.Put(buff) }
 		p = buff[r.offset:]
 		r.buffers[r.index] = nil
 		if r.next == -1 {
@@ -98,7 +99,7 @@ func (r *ringbuffer) Recycle() (n int) {
 				r.offset = 0
 			}
 			r.buffers[idx] = nil
-			defaultAllocator.Put(buff)
+			r.alloc.Put(buff)
 		}
 		r.next = 0
 	}
